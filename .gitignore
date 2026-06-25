@@ -1,0 +1,8 @@
+node_modules/
+package-lock.json
+chunkspelunker-output.json
+auth.json
+*.storage.json
+recovered-src/
+.tmp/
+coverage/

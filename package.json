@@ -1,0 +1,48 @@
+{
+  "name": "chunkspelunker",
+  "version": "1.0.0",
+  "description": "Headless SPA crawler that extracts JS chunks, source maps, and API endpoints into Postman/OpenAPI collections for authorized security testing",
+  "type": "module",
+  "bin": {
+    "chunkspelunker": "./bin/chunkspelunker.js"
+  },
+  "main": "./src/pipeline.js",
+  "scripts": {
+    "start": "node bin/chunkspelunker.js",
+    "test": "node --test test/**/*.test.js",
+    "postinstall": "npx playwright install chromium"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "docs/",
+    "SPEC.md",
+    "README.md",
+    "package.json"
+  ],
+  "keywords": [
+    "security",
+    "pentest",
+    "spa",
+    "sourcemap",
+    "playwright",
+    "postman",
+    "openapi",
+    "recon",
+    "ast",
+    "burp"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@babel/parser": "^7.26.0",
+    "@babel/traverse": "^7.26.0",
+    "@babel/types": "^7.26.0",
+    "commander": "^12.1.0",
+    "playwright": "^1.49.0",
+    "source-map": "^0.7.4",
+    "yaml": "^2.6.0"
+  }
+}
