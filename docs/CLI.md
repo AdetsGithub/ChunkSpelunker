@@ -93,7 +93,7 @@ npx chunkspelunker -u https://app.example.com \
 | `--exclude-selector <css>` | CSS | see below | Documented default list (logout/delete). Runtime exclusion also uses text/href/id/class heuristics because Playwright-only selectors like `:has-text()` are not valid in `Element.matches`. |
 | `--force-clicks` | boolean | `true` | Use Playwright `{ force: true }` to bypass actionability (modals/backdrops). |
 | `--no-force-clicks` | — | — | Disable force clicks. |
-| `--same-origin-only` | boolean | `true` | Only enqueue same-origin navigations **and** skip click targets whose `href` resolves off-origin. If a click still leaves the origin, the crawler returns to the target and does not enqueue off-site pages. Cross-origin **API** calls are still recorded. |
+| `--same-origin-only` | boolean | `true` | Only enqueue same-origin navigations **and** skip click/href targets that leave the origin — including same-origin open-redirect URLs that embed an external destination (e.g. `/redirect?to=https://github.com/...`). If a navigation still lands off-origin, the crawler recovers to the target and does not enqueue off-site pages. Cross-origin **API** calls are still recorded. |
 | `--no-same-origin-only` | — | — | Allow cross-origin crawl links and off-site clicks. |
 
 ### Default `--click-selector`
