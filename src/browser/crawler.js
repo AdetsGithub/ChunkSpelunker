@@ -151,6 +151,14 @@ export async function crawl(options, log) {
 
     if (item.kind === 'goto') {
       if (visited.has(normalizeVisitUrl(item.url))) continue;
+      if (
+        options.sameOriginOnly !== false &&
+        hasOutboundRedirectTarget(item.url, options.baseUrl.origin)
+      ) {
+        log.debug(`skip goto open-redirect ${item.url}`);
+        visited.add(normalizeVisitUrl(item.url));
+        continue;
+      }
       visited.add(normalizeVisitUrl(item.url));
       navigations++;
       log.info(`Goto [${item.depth}] ${item.url}`);
@@ -164,6 +172,14 @@ export async function crawl(options, log) {
         log.debug(`goto failed: ${err.message}`);
         continue;
       }
+      if (
+        options.sameOriginOnly !== false &&
+        isOffOrigin(page.url(), options.baseUrl.origin)
+      ) {
+        log.warn(`goto landed off-origin (${page.url()}); recovering`);
+        await recoverToOrigin(page, options, options.url, log);
+        continue;
+      }
       if (item.depth < options.depth) {
         await enqueueFromPage(page, queue, options, visited, item.depth + 1, log);
       }
@@ -174,8 +190,22 @@ export async function crawl(options, log) {
     clicks++;
     const before = page.url();
 
+    // Re-check origin before clicking (page may have drifted)
+    if (isOffOrigin(before, options.baseUrl.origin) && options.sameOriginOnly !== false) {
+      log.warn(`off-origin page before click (${before}); returning to target`);
+      await recoverToOrigin(page, options, before, log);
+      continue;
+    }
+
     try {
       const loc = page.locator(item.selector).nth(item.index);
+      // Skip if this index now resolves to an external link (DOM may have shifted;
+      // primary filter is at enqueue time)
+      const external = await isExternalClickTarget(loc, options.baseUrl.origin).catch(() => false);
+      if (external && options.sameOriginOnly !== false) {
+        log.debug(`skip click index ${item.index} — external href`);
+        continue;
+      }
       await loc.click({
         force: options.forceClicks !== false,
         timeout: 3000,
@@ -188,6 +218,12 @@ export async function crawl(options, log) {
     }
 
     const after = page.url();
+    if (options.sameOriginOnly !== false && isOffOrigin(after, options.baseUrl.origin)) {
+      log.warn(`left origin via click (${before} -> ${after}); returning to target`);
+      await recoverToOrigin(page, options, before, log);
+      continue;
+    }
+
     if (after !== before) {
       log.debug(`click navigated ${before} -> ${after}`);
       if (isSessionDeath(before, after) && (options.state || options.cookie || options.headers?.length)) {
@@ -232,6 +268,11 @@ export async function crawl(options, log) {
 async function enqueueFromPage(page, queue, options, visited, depth, log) {
   const origin = options.baseUrl.origin;
 
+  if (options.sameOriginOnly !== false && isOffOrigin(page.url(), origin)) {
+    log.warn(`skip enqueue — off-origin page ${page.url()}`);
+    return;
+  }
+
   // Href harvest
   const hrefs = await page.$$eval('a[href]', (els) =>
     els.map((a) => a.getAttribute('href')).filter(Boolean),
@@ -246,7 +287,13 @@ async function enqueueFromPage(page, queue, options, visited, depth, log) {
     } catch {
       continue;
     }
-    if (options.sameOriginOnly !== false && new URL(abs).origin !== origin) continue;
+    if (options.sameOriginOnly !== false) {
+      if (new URL(abs).origin !== origin) continue;
+      if (hasOutboundRedirectTarget(abs, origin)) {
+        log.debug(`skip href open-redirect ${abs}`);
+        continue;
+      }
+    }
     const norm = normalizeVisitUrl(abs);
     if (visited.has(norm)) continue;
     // exclude-selector check approximate via URL
@@ -261,6 +308,10 @@ async function enqueueFromPage(page, queue, options, visited, depth, log) {
   for (let i = 0; i < Math.min(count, maxPerPage); i++) {
     const el = page.locator(options.clickSelector).nth(i);
     try {
+      if (options.sameOriginOnly !== false) {
+        const external = await isExternalClickTarget(el, origin).catch(() => false);
+        if (external) continue;
+      }
       const excluded = await el.evaluate((node) => {
         const text = (node.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
         const href = (node.getAttribute?.('href') || '').toLowerCase();
@@ -286,6 +337,133 @@ async function enqueueFromPage(page, queue, options, visited, depth, log) {
     }
   }
   log.debug(`enqueued clicks/hrefs from ${page.url()} (depth ${depth})`);
+}
+
+/**
+ * True when url's origin differs from targetOrigin.
+ * @param {string} url
+ * @param {string} targetOrigin
+ */
+export function isOffOrigin(url, targetOrigin) {
+  try {
+    return new URL(url).origin !== targetOrigin;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Same-origin open-redirect style links (e.g. /redirect?to=https://github.com/...).
+ * Scans query values and the full URL string for embedded absolute http(s) origins
+ * that differ from targetOrigin.
+ * @param {string} url
+ * @param {string} targetOrigin
+ */
+export function hasOutboundRedirectTarget(url, targetOrigin) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.origin !== targetOrigin) return true;
+
+  for (const value of parsed.searchParams.values()) {
+    if (embeddedOffOrigin(value, targetOrigin)) return true;
+  }
+  // Catch encoded destinations that never became discrete searchParams values
+  if (embeddedOffOrigin(parsed.href, targetOrigin)) return true;
+  return false;
+}
+
+/**
+ * @param {string} text
+ * @param {string} targetOrigin
+ */
+function embeddedOffOrigin(text, targetOrigin) {
+  if (!text || !/https?:\/\//i.test(text)) return false;
+  const re = /https?:\/\/[^\s"'<>\\]+/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    try {
+      const candidate = new URL(m[0].replace(/[),.;]+$/, ''));
+      if (candidate.origin !== targetOrigin) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a locator points at (or wraps) an anchor whose href leaves targetOrigin.
+ * Hash-only and same-origin relative links are allowed.
+ * Same-origin open redirects that embed an external URL are treated as external.
+ * @param {import('playwright').Locator} loc
+ * @param {string} targetOrigin
+ */
+async function isExternalClickTarget(loc, targetOrigin) {
+  return loc.evaluate((node, origin) => {
+    /** @type {Element | null} */
+    let el = node;
+    if (el && el.nodeType !== 1) el = el.parentElement;
+    const anchor =
+      el && typeof el.closest === 'function'
+        ? el.closest('a[href]')
+        : el?.tagName === 'A'
+          ? el
+          : null;
+    if (!anchor) return false;
+    const href = anchor.getAttribute('href');
+    if (!href || href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) {
+      return false;
+    }
+    // In-app hash routes (#/login) stay on origin
+    if (href.startsWith('#')) return false;
+    try {
+      const abs = new URL(href, location.href);
+      if (abs.origin !== origin) return true;
+      // Open-redirect pattern: ?to=https://other...
+      for (const value of abs.searchParams.values()) {
+        if (/https?:\/\//i.test(value)) {
+          try {
+            if (new URL(value).origin !== origin) return true;
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      const re = /https?:\/\/[^\s"'<>\\]+/gi;
+      let m;
+      while ((m = re.exec(abs.href))) {
+        try {
+          if (new URL(m[0].replace(/[),.;]+$/, '')).origin !== origin) return true;
+        } catch {
+          /* ignore */
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, targetOrigin);
+}
+
+async function recoverToOrigin(page, options, preferredUrl, log) {
+  const candidates = [preferredUrl, options.url, options.baseUrl.href].filter(Boolean);
+  for (const url of candidates) {
+    try {
+      if (isOffOrigin(url, options.baseUrl.origin)) continue;
+      await page.goto(url, {
+        waitUntil: options.waitUntil || 'domcontentloaded',
+        timeout: options.timeout,
+      });
+      await settle(page, Math.min(options.timeout, 5000));
+      if (!isOffOrigin(page.url(), options.baseUrl.origin)) return;
+    } catch (err) {
+      log.debug(`recover navigation failed (${url}): ${err.message}`);
+    }
+  }
 }
 
 async function settle(page, timeout) {

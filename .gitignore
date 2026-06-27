@@ -6,3 +6,7 @@ auth.json
 recovered-src/
 .tmp/
 coverage/
+
+# Local smoke-test outputs (do not commit)
+smoke-*/
+SMOKE_INDEX.md
